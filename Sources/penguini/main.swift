@@ -1,8 +1,13 @@
 import Penguin
 
 let input = """
+func factorial(n) -> Int {
+  return n
+}
+
 let x = 82
 var y = 41
+return 0
 print(x)
 """
 
@@ -16,6 +21,5 @@ context.functions = [main]
 context.block = block
 
 // Transpile the input into Penguin IR.
-Transpiler.parse(input, in: &context)
-
-print(block.instructions)
+Parser.initialize()
+Parser.parse(input)

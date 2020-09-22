@@ -1,58 +1,32 @@
 import Diesel
 
-public typealias TranspilerState = (context: TranspilerContext, tokens: ArraySlice<Token>)
-
-public enum Transpiler {
+public enum Parser {
 
   public typealias Stream = ArraySlice<Token>
 
   public static func initialize() {
+    defineExpression()
+    defineStatement()
   }
 
-  public static func parse(_ source: String, in context: inout TranspilerContext) {
-    parse(Array(Lexer(source: source)), in: &context)
+  public static func parse(_ source: String) {
+    parse(Array(Lexer(source: source)))
   }
 
-  public static func parse(_ tokens: [Token], in context: inout TranspilerContext) {
-    var stream = ArraySlice(tokens)
+  public static func parse(_ tokens: [Token]) {
+    switch statementList.parse(ArraySlice(tokens)) {
+    case .success(let ast, let remainder):
+      print(ast)
+      print(remainder)
 
-    while !stream.isEmpty && stream.first?.kind != .eof {
-      // Attempt to parse a function prologue.
-      if case .success(let term, let remainder) = functionPrologue.parse(stream) {
-        let function = context.buildFunction(name: term.0)
-        let currentBlock = context.block
-
-        stream = remainder
-        continue
-      }
-
-      // Attempt to parse a constant declaration.
-      if case .success(let term, let remainder) = constantDeclaration.parse(stream) {
-        for (pattern, initializer) in term {
-          switch pattern {
-          case .identifier:
-            let alloca = context.buildAlloca()
-            if let expression = initializer {
-              let value = emit(expression: expression, in: &context)
-              context.buildStore(value: value, destination: alloca)
-            }
-          }
-        }
-
-        stream = remainder
-        continue
-      }
-
-      break
+    case .failure(let error):
+      print(error)
     }
   }
 
-  static func emit(expression: Expression, in context: inout TranspilerContext) -> Value {
-    switch expression {
-    case .integer(let i):
-      return ConstantInteger(value: i)
-    }
-  }
+  static let statementList = statement
+    .surrounded(by: newlines)
+    .many
 
   // MARK: Type Signatures
 
@@ -65,27 +39,106 @@ public enum Transpiler {
 
   // MARK: Expressions
 
-  static let expression = integer
+  static let expression = ForwardParser<Expression, Stream>()
+
+  static func defineExpression() {
+    let value = primaryExpression
+      .then(trailer.optional)
+      .map({ (head, tail) -> Expression in
+        switch tail {
+        case .argumentClause(let arguments):
+          return CallExpression(callee: head, arguments: arguments ?? [])
+        case nil:
+          return head
+        }
+      })
+
+    expression.define(value)
+  }
+
+  static let primaryExpression = identifier.map({ $0 as Expression })
+    .else(integer.map({ $0 as Expression }))
+
+  enum Trailer {
+
+    case argumentClause([Argument]?)
+
+  }
+
+  static let trailer = argumentClause
+
+  static let argumentClause = token(.leftParen)
+    .then(newlines)
+    .then(argumentList.optional, combine: discardLeft)
+    .then(newlines, combine: discardRight)
+    .then(token(.rightParen), combine: discardRight)
+    .map({ Trailer.argumentClause($0) })
+
+  static let argumentList = argument
+    .then(token(.comma)
+      .surrounded(by: token(.newline))
+      .then(argument, combine: discardLeft)
+      .many)
+    .map({ head, tail in [head] + tail })
+
+  static let argument = labeledArgument
+    .else(expression.map({ Argument(label: nil, value: $0) }))
+
+  static let labeledArgument = token(.identifier)
+    .then(token(.colon).surrounded(by: token(.newline)), combine: discardRight)
+    .then(expression)
+    .map({ Argument(label: String($0.0.value), value: $0.1) })
+
+  static let identifier = token(.identifier)
+    .map({ Identifier(name: String($0.value)) })
 
   /// integer-literal
   static let integer = token(.integer)
-    .map({ (token: Token) throws -> Expression in
+    .map({ (token: Token) throws -> IntegerLiteral in
       guard let i = Int(token.value)
         else { throw SyntaxError(description: "Invalid integer literal '\(token.value)'.") }
-      return .integer(i)
+      return IntegerLiteral(value: i)
     })
 
   // MARK: Statements
 
+  static let statement = ForwardParser<Statement, Stream>()
+
+  static func defineStatement() {
+    let value = expression.map({ $0 as Statement })
+      .else(declaration.map({ $0 as Statement }))
+      .else(returnStatement.map({ $0 as Statement }))
+      .then(statementEnd, combine: discardRight)
+
+    statement.define(value)
+  }
+
+  static let statementEnd = token(.newline)
+    .else(token(.semicolon))
+    .else(token(.eof))
+
+  /// return-statement :: `return` expression?
+  static let returnStatement = token(.return_)
+    .then(newlines)
+    .then(expression.optional, combine: discardLeft)
+    .map({ ReturnStatement(value: $0) })
+
   // MARK: Declarations
+
+  static let declaration =
+    constantDeclaration.map({ $0 as Declaration })
+      .else(variableDeclaration.map({ $0 as Declaration }))
+      .else(functionDeclaration.map({ $0 as Declaration }))
 
   /// constant-declaration :: `let` pattern-initializer-list
   static let constantDeclaration = token(.let_)
     .then(patternInitializerList, combine: discardLeft)
+    .map({ ConstantDeclaration(bindings: $0) })
 
   /// variable-declaration :: `var` pattern-initializer-list
   static let variableDeclaration = token(.var_)
     .then(patternInitializerList, combine: discardLeft)
+    .map({ VariableDeclaration(bindings: $0) })
 
   /// pattern-initializer-list :: pattern-initializer ( `,` pattern-initializer )*
   static let patternInitializerList = patternInitializer
@@ -101,7 +154,17 @@ public enum Transpiler {
 
   /// initializer :: `=` expression
   static let initializer = token(.assign)
+    .then(newlines)
     .then(expression, combine: discardLeft)
+
+  /// function-declaration :: function-prologue code-block
+  static let functionDeclaration = functionPrologue
+    .then(newlines, combine: discardRight)
+    .then(codeBlock)
+    .map({ (decl, body) -> FunctionDeclaration in
+      decl.body = body
+      return decl
+    })
 
   /// function-prologue :: `func` function-name function-signature
   static let functionPrologue = token(.func_)
@@ -109,6 +172,13 @@ public enum Transpiler {
     .then(functionName, combine: discardLeft)
     .then(newlines, combine: discardRight)
     .then(functionSignature)
+    .map({ (term) -> FunctionDeclaration in
+      FunctionDeclaration(
+        name: term.0,
+        parameters: term.1.0 ?? [],
+        result: term.1.1,
+        body: nil)
+    })
 
   /// function-name :: identifier
   static let functionName = token(.identifier)
@@ -137,6 +207,12 @@ public enum Transpiler {
   static let parameter = parameterName
     .then(newlines.then(parameterName, combine: discardLeft).optional)
     .then(newlines.then(typeAnnotation, combine: discardLeft).optional)
+    .map({ (term) -> ParameterDeclaration in
+      ParameterDeclaration(
+        externalName  : term.0.0,
+        localName     : term.0.1 ?? term.0.0,
+        typeAnnotation: term.1)
+    })
 
   /// parameter-name :: identifier
   static let parameterName = token(.identifier)
@@ -160,6 +236,7 @@ public enum Transpiler {
   /// code-block :: `{` statement-list? `}`
   static let codeBlock = token(.leftBrace)
     .then(newlines)
+    .then(statementList, combine: discardLeft)
     .then(newlines, combine: discardRight)
     .then(token(.rightBrace), combine: discardRight)
 
@@ -176,23 +253,5 @@ public enum Transpiler {
   static func discardLeft<T, U>(lhs: T, rhs: U) -> U {
     return rhs
   }
-
-}
-
-enum TypeSignature {
-
-  case identifier(String)
-
-}
-
-enum Expression {
-
-  case integer(Int)
-
-}
-
-enum Pattern {
-
-  case identifier(String)
 
 }

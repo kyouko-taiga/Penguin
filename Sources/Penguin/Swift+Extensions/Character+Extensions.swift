@@ -10,6 +10,6 @@ extension Character {
     return Character.operatorsAndPunctuation.contains(self)
   }
 
-  static let operatorsAndPunctuation = Set(".,:!?(){}[]<>-*/%+-=&")
+  static let operatorsAndPunctuation = Set(".,;:!?(){}[]<>-*/%+-=&")
 
 }

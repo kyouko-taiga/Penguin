@@ -28,12 +28,16 @@ public struct Lexer: IteratorProtocol, Sequence {
 
     let start = index
 
-    // Lex statement delimiters.
+    // Merge new lines with subsequent whitespaces.
     if ch.isNewline {
+      take(while: { $0.isWhitespace })
+      return Token(kind: .newline, value: source[start ..< source.index(after: start)])
+    }
+
+    // Lex explicit statement delimiters.
+    if ch == ";" {
       take(while: { $0.isWhitespace || $0 == ";" })
-      return Token(
-        kind: (ch == ";") ? .semicolon : .newline,
-        value: source[start ..< source.index(after: start)])
+      return Token(kind: .semicolon, value: source[start ..< source.index(after: start)])
     }
 
     // Lex identifiers and keywords.
